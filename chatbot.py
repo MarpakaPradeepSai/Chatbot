@@ -1,65 +1,90 @@
+import os
+import requests
 import streamlit as st
 from transformers import GPT2Tokenizer, GPT2LMHeadModel, TextIteratorStreamer
 import torch
 import spacy
 import warnings
 from threading import Thread
-import os
 
-warnings.filterwarnings('ignore')
+warnings.filterwarnings("ignore")
 
-# GitHub model path (cloned automatically by Streamlit Cloud)
-MODEL_REPO = "MarpakaPradeepSai/Chatbot"
-MODEL_DIR = "Model/Final_Advanced_ticketing_events_DistilGPT2_fine-tuned"
+# --------------------
+# GitHub model details
+# --------------------
+GITHUB_MODEL_URL = "https://github.com/MarpakaPradeepSai/Chatbot/raw/main/Model"
+MODEL_FILES = [
+    "config.json",
+    "generation_config.json",
+    "merges.txt",
+    "model.safetensors",
+    "special_tokens_map.json",
+    "tokenizer_config.json",
+    "vocab.json"
+]
 
-# Clone the model repo if not already present
-if not os.path.exists("Model"):
-    os.system(f"git clone https://github.com/{MODEL_REPO}.git")
+def download_model_files(model_dir="/tmp/Chatbot_Model"):
+    """Download model files from GitHub if not already present."""
+    os.makedirs(model_dir, exist_ok=True)
+    for filename in MODEL_FILES:
+        url = f"{GITHUB_MODEL_URL}/{filename}"
+        local_path = os.path.join(model_dir, filename)
+        if not os.path.exists(local_path):
+            r = requests.get(url)
+            if r.status_code == 200:
+                with open(local_path, "wb") as f:
+                    f.write(r.content)
+            else:
+                st.error(f"❌ Failed to download {filename} from GitHub.")
+                return None
+    return model_dir
 
-# Load model & tokenizer
 @st.cache_resource
-def load_model():
-    model = GPT2LMHeadModel.from_pretrained(MODEL_DIR)
-    tokenizer = GPT2Tokenizer.from_pretrained(MODEL_DIR)
+def load_model_and_tokenizer():
+    """Download and load the GPT-2 model."""
+    model_dir = download_model_files()
+    if not model_dir:
+        st.stop()
+    model = GPT2LMHeadModel.from_pretrained(model_dir)
+    tokenizer = GPT2Tokenizer.from_pretrained(model_dir)
     return model, tokenizer
 
-model, tokenizer = load_model()
-
-# Load SpaCy model for NER
 @st.cache_resource
-def load_spacy():
+def load_spacy_model():
     return spacy.load("en_core_web_trf")
 
-nlp = load_spacy()
+model, tokenizer = load_model_and_tokenizer()
+nlp = load_spacy_model()
 
-# Static placeholders dictionary
+# --------------------
+# Placeholders
+# --------------------
 static_placeholders = {
     "{{WEBSITE_URL}}": "www.events-ticketing.com",
     "{{SUPPORT_TEAM_LINK}}": "www.support-team.com",
     "{{CONTACT_SUPPORT_LINK}}" : "www.support-team.com",
-    "{{SUPPORT_CONTACT_LINK}}" : "www.support-team.com",
-    "{{CANCEL_TICKET_SECTION}}": "<b>Cancel Ticket</b>",
-    "{{GET_REFUND_OPTION}}": "<b>Get Refund</b>",
-    # ... (keep the rest of your placeholder mappings here)
+    "{{CITY}}": "city",
+    "{{EVENT}}": "event"
+    # Add rest from your original dictionary...
 }
 
-# Extract dynamic placeholders
+# --------------------
+# Helper functions
+# --------------------
 def extract_dynamic_placeholders(instruction):
     doc = nlp(instruction)
     dynamic_placeholders = {}
     for ent in doc.ents:
-        if ent.label_ == "EVENT":
+        if ent.label_ == "EVENT":  
             dynamic_placeholders['{{EVENT}}'] = f"<b>{ent.text.title()}</b>"
         elif ent.label_ == "GPE":
             dynamic_placeholders['{{CITY}}'] = f"<b>{ent.text.title()}</b>"
-
     if '{{EVENT}}' not in dynamic_placeholders:
         dynamic_placeholders['{{EVENT}}'] = "event"
     if '{{CITY}}' not in dynamic_placeholders:
         dynamic_placeholders['{{CITY}}'] = "city"
     return dynamic_placeholders
 
-# Replace placeholders
 def replace_placeholders(response, dynamic_placeholders, static_placeholders):
     for placeholder, value in static_placeholders.items():
         response = response.replace(placeholder, value)
@@ -67,35 +92,48 @@ def replace_placeholders(response, dynamic_placeholders, static_placeholders):
         response = response.replace(placeholder, value)
     return response
 
-# Generate response without streaming
-def generate_response(instruction, max_length=256):
+def generate_response_streaming(instruction, max_length=256):
     device = model.device
     model.eval()
     dynamic_placeholders = extract_dynamic_placeholders(instruction)
+    streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     input_text = f"Instruction: {instruction} Response:"
     inputs = tokenizer(input_text, return_tensors='pt', padding=True).to(device)
-    with torch.no_grad():
-        outputs = model.generate(
-            input_ids=inputs['input_ids'],
-            attention_mask=inputs['attention_mask'],
-            max_length=max_length,
-            temperature=0.7,
-            top_p=0.95,
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id
-        )
-    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    response_start = response.find("Response:") + len("Response:")
-    raw_response = response[response_start:].lstrip()
-    return replace_placeholders(raw_response, dynamic_placeholders, static_placeholders)
 
+    gen_kwargs = dict(
+        input_ids=inputs['input_ids'],
+        attention_mask=inputs['attention_mask'],
+        max_length=max_length,
+        temperature=0.7,
+        top_p=0.95,
+        do_sample=True,
+        pad_token_id=tokenizer.eos_token_id,
+        streamer=streamer
+    )
+
+    thread = Thread(target=model.generate, kwargs=gen_kwargs)
+    thread.start()
+
+    final_text = ""
+    for new_text in streamer:
+        final_text += new_text
+        processed = replace_placeholders(final_text, dynamic_placeholders, static_placeholders)
+        yield processed
+
+    thread.join()
+
+# --------------------
 # Streamlit UI
+# --------------------
+st.set_page_config(page_title="Event Ticketing Chatbot", layout="wide")
 st.title("🎟️ Event Ticketing Chatbot")
-st.markdown("Ask me anything related to events, tickets, refunds, cancellations, etc.")
 
-user_input = st.text_input("Enter your question:")
-if st.button("Get Response"):
-    if user_input.strip():
-        with st.spinner("Generating response..."):
-            answer = generate_response(user_input)
-        st.markdown(answer, unsafe_allow_html=True)
+user_input = st.text_input("Ask me something about events or tickets:")
+
+if user_input:
+    st.write("**Chatbot:**")
+    placeholder = st.empty()
+    streamed_text = ""
+    for partial_output in generate_response_streaming(user_input):
+        streamed_text = partial_output
+        placeholder.markdown(streamed_text, unsafe_allow_html=True)
