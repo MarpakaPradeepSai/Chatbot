@@ -1,8 +1,8 @@
-wheel
 streamlit==1.32.0
-spacy==3.7.4
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+transformers
+sentencepiece
+spacy==3.7.2
 spacy-transformers==1.3.4
 https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.7.3/en_core_web_trf-3.7.3.tar.gz
-sentencepiece
-torch
-blis==0.7.9 --only-binary=:all:
